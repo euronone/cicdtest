@@ -31,10 +31,7 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    # Only run if secrets are configured and on main/master branch
-    if: |
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
-      secrets.EC2_HOST != '' && secrets.EC2_SSH_PRIVATE_KEY != ''
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     
     steps:
     - uses: actions/checkout@v3
@@ -53,22 +50,64 @@ jobs:
         
         # Run deployment script on EC2
         ssh -o StrictHostKeyChecking=no -i private_key.pem ${USER}@${HOST} << 'EOF'
+          set -e
+          
+          # Create app directory
+          mkdir -p /home/ubuntu/app
           cd /home/ubuntu/app
           
-          # Stop existing service
-          sudo systemctl stop fastapi-app || true
+          # Install Python and pip if not present
+          if ! command -v pip3 &> /dev/null; then
+            echo "Installing Python pip..."
+            sudo apt-get update
+            sudo apt-get install -y python3-pip python3-venv
+          fi
+          
+          # Create and activate virtual environment
+          python3 -m venv venv || true
+          source venv/bin/activate
           
           # Install/Update dependencies
-          python3 -m pip install --upgrade pip
-          pip3 install -r requirements.txt
+          pip install --upgrade pip
+          pip install -r requirements.txt
           
-          # Start the service
+          # Create systemd service if it doesn't exist
+          if [ ! -f /etc/systemd/system/fastapi-app.service ]; then
+            echo "Creating systemd service..."
+            sudo tee /etc/systemd/system/fastapi-app.service > /dev/null <<SERVICE
+[Unit]
+Description=FastAPI Application
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/app
+Environment="PATH=/home/ubuntu/app/venv/bin"
+ExecStart=/home/ubuntu/app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+          fi
+          
+          # Stop existing service (if running)
+          sudo systemctl stop fastapi-app || true
+          
+          # Reload, enable and start the service
           sudo systemctl daemon-reload
-          sudo systemctl start fastapi-app
           sudo systemctl enable fastapi-app
+          sudo systemctl start fastapi-app
+          
+          # Wait a moment for service to start
+          sleep 2
           
           # Check status
-          sudo systemctl status fastapi-app
+          sudo systemctl status fastapi-app --no-pager
+          
+          echo "✅ Deployment completed successfully!"
         EOF
         
         rm -f private_key.pem
